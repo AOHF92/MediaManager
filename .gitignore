@@ -2,6 +2,10 @@
 logs/
 Scripts/logs/
 
+# --- Internal planning / transition docs ---
+agents.md
+ToDO.md
+
 # --- Backups / temp output (common names) ---
 backup/
 backups/
