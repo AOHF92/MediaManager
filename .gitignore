@@ -1,0 +1,44 @@
+# --- Generated logs ---
+logs/
+Scripts/logs/
+
+# --- Backups / temp output (common names) ---
+backup/
+backups/
+Backup/
+Backups/
+temp/
+tmp/
+Temp/
+Tmp/
+
+# --- Script temp artifacts ---
+*__converting__*
+*.tmp
+*.temp
+
+# --- Common generated media byproducts (if your scripts create them) ---
+*.log
+*.ffindex
+*.ffmeta
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+
+# --- Editor backups ---
+*.bak
+*.old
+*.orig
+*.swp
+
+# --- Secrets / local config ---
+.env
+*.secret
+config.local.*
+secrets.*
