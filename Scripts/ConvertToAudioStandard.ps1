@@ -462,6 +462,101 @@ function Resolve-Artist {
   return "Unknown Artist"
 }
 
+# ==================== T10.1: Disc Number Fallback + Album Normalization ====================
+
+function Resolve-DiscNumberFromPath {
+  <#
+    Attempts to infer disc number from the folder path when tags are missing.
+
+    Supported folder name patterns (case-insensitive):
+      - Disc 1, Disc01, Disc_1
+      - Disk 2, Disk02
+      - CD3, CD 03
+
+    We only infer disc from folder names (not from the filename) to avoid false positives.
+  #>
+  param(
+    [Parameter(Mandatory)][string]$FilePath
+  )
+
+  $dir = [System.IO.Path]::GetDirectoryName($FilePath)
+  while ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) {
+    $leaf = (Split-Path -Leaf $dir)
+    if ($leaf) {
+      $name = $leaf.Trim()
+      # Normalize separators to spaces for easier matching
+      $nameNorm = ($name -replace '[_\-]+', ' ').Trim()
+
+      # Match: Disc 1 / Disk 2 / CD 03 / CD3
+      if ($nameNorm -match '^(disc|disk|cd)\s*0*(\d{1,2})$') {
+        return $matches[2]
+      }
+    }
+    $dir = [System.IO.Path]::GetDirectoryName($dir)
+  }
+
+  return $null
+}
+
+function Convert-AlbumTrailingDiscMarker {
+  <#
+    Removes trailing disc markers from the ALBUM tag so multi-disc sets group into one album.
+
+    Examples:
+      - "Final Fantasy X Original Soundtrack (Disc 1)" -> "Final Fantasy X Original Soundtrack"
+      - "Album [CD2]" -> "Album"
+      - "Album - Disc 03" -> "Album"
+  #>
+  param(
+    [Parameter(Mandatory)][string]$Album
+  )
+
+  $a = $Album.Trim()
+
+  # Remove trailing patterns like "(Disc 1)", "[CD2]", "- Disc 03"
+  $a2 = $a -replace '\s*(?:[\(\[]\s*)?(disc|disk|cd)\s*0*\d{1,2}(?:\s*[\)\]])?\s*$', ''
+  $a2 = $a2 -replace '\s*[-–—]\s*$', ''
+  $a2 = $a2.Trim()
+
+  if ([string]::IsNullOrWhiteSpace($a2)) { return $a }
+  return $a2
+}
+
+function Set-DiscFallbackAndNormalizeAlbum {
+  <#
+    Implements:
+      A) Disc fallback: infer DISCNUMBER from folder name when missing.
+      B) Album normalization: if disc was inferred, strip "(Disc X)" style suffixes from ALBUM.
+
+    Missing-only behavior: we NEVER overwrite an existing disc tag.
+  #>
+  param(
+    [Parameter(Mandatory)][hashtable]$Metadata,
+    [Parameter(Mandatory)][string]$FilePath
+  )
+
+  $discWasInferred = $false
+
+  # A) Infer disc number only if missing
+  if (-not $Metadata.Disc -or [string]::IsNullOrWhiteSpace([string]$Metadata.Disc)) {
+    $disc = Resolve-DiscNumberFromPath -FilePath $FilePath
+    if ($disc) {
+      $Metadata.Disc = $disc
+      $discWasInferred = $true
+    }
+  }
+
+  # B) Normalize album only when disc was inferred
+  if ($discWasInferred -and $Metadata.Album -and -not [string]::IsNullOrWhiteSpace([string]$Metadata.Album)) {
+    $normalized = Convert-AlbumTrailingDiscMarker -Album ([string]$Metadata.Album)
+    if ($normalized -ne $Metadata.Album) {
+      $Metadata.Album = $normalized
+    }
+  }
+
+  return $Metadata
+}
+
 # ==================== T11: Build Output Paths (Navidrome Layout) ====================
 
 function Build-OutputPath {
@@ -1045,6 +1140,9 @@ function Invoke-MainProcessing {
     
     # Extract metadata
     $metadata = Get-EmbeddedMetadata -FFprobePath $ffprobePath -FilePath $file.FullName
+    
+    # A + B: Disc fallback from folder name + Album normalization for multi-disc sets
+    $metadata = Set-DiscFallbackAndNormalizeAlbum -Metadata $metadata -FilePath $file.FullName
     
     # Resolve year and artist
     $resolvedYear = Resolve-Year -Metadata $metadata -FilePath $file.FullName
