@@ -1,16 +1,15 @@
 <#
 OpusBatchTagger.ps1
-Batch edit Opus (.opus) metadata using Kid3 CLI (kid3-cli), with optional embedded cover art.
+Batch edit Opus (.opus) metadata using kid3-cli (in-place), with optional embedded cover art.
 
 Requires:
-- kid3-cli.exe in PATH (required)
-- ffprobe.exe in PATH (used to read existing tags)
-- ffmpeg.exe in PATH (only needed if you enable cover-art embedding)
+- kid3-cli in PATH (recommended) for tag writes
+- ffmpeg.exe and ffprobe.exe in PATH (cover art + tag reads)
 - Works on Windows 10/11
 Notes:
-- Opus tags are Vorbis Comments.
-- kid3-cli supports setting common Vorbis comment fields using: kid3-cli -c "set artist 'Name'" file.opus
-- Cover art: embedded as an attachment stream in the Opus container (requires FFmpeg).
+- Opus tags are Vorbis Comments (FIELD=Value).
+- kid3-cli edits OPUS Vorbis comments in-place without re-encoding.
+- Cover art: embedded as attachment stream in OPUS container (requires FFmpeg).
 
 Safety:
 - Default is DRY RUN.
@@ -23,13 +22,13 @@ param(
   [string]$RootPath = "",
 
   [Parameter(Mandatory=$false)]
+  [string]$Kid3CliPath = "kid3-cli",
+
+  [Parameter(Mandatory=$false)]
   [string]$FFmpegPath = "ffmpeg",
 
   [Parameter(Mandatory=$false)]
   [string]$FFprobePath = "ffprobe",
-
-  [Parameter(Mandatory=$false)]
-  [string]$Kid3CliPath = "kid3-cli",
 
   [Parameter(Mandatory=$false)]
   [switch]$Commit
@@ -50,11 +49,68 @@ function Resolve-FFmpegTool {
   throw "$ToolName not found. Put $ToolName.exe in PATH or specify -${ToolName}Path 'C:\path\$ToolName.exe'"
 }
 
-function Resolve-Kid3CliTool {
+function Resolve-Kid3Cli {
   param([string]$Path)
   if ($Path -and (Test-Path $Path)) { return (Resolve-Path $Path).Path }
   if (Test-CommandExists $Path) { return $Path }
-  throw "kid3-cli not found. Put kid3-cli.exe in PATH or specify -Kid3CliPath 'C:\\path\\kid3-cli.exe'"
+  throw "kid3-cli not found. Put kid3-cli in PATH or specify -Kid3CliPath 'C:\path\kid3-cli.exe'"
+}
+
+function ConvertTo-Kid3Value {
+  param([string]$Value)
+  if ($null -eq $Value) { return "" }
+  # kid3-cli command strings are quoted with single quotes; escape backslashes and single quotes.
+  return $Value.Replace("\\", "\\\\").Replace("'", "\\'")
+}
+
+function Invoke-Kid3Write {
+  param(
+    [string]$Kid3Cli,
+    [string]$FilePath,
+    [string]$TagName,
+    [object]$Value,   # string or string[]
+    [switch]$DoCommit
+  )
+
+  if (-not $DoCommit) { return $true }
+
+  $t = $TagName.ToLower()
+  $isEnumerable = ($Value -is [System.Collections.IEnumerable]) -and -not ($Value -is [string])
+
+  if ($t -eq "genre" -and $isEnumerable) {
+    $vals = @()
+    foreach ($item in $Value) {
+      if ($null -eq $item) { continue }
+      $s = ("" + $item).Trim()
+      if (-not [string]::IsNullOrWhiteSpace($s)) { $vals += $s }
+    }
+    if ($vals.Count -eq 0) { return $false }
+
+    # Kid3 stores multi-values as indexed fields: genre[0], genre[1], ...
+    # Clear a reasonable number of slots first, then set what we need.
+    $cmds = @()
+    for ($i = 0; $i -lt 10; $i++) {
+      $cmds += "set genre[$i] ''"
+    }
+    for ($i = 0; $i -lt $vals.Count; $i++) {
+      $vEsc = ConvertTo-Kid3Value $vals[$i]
+      $cmds += "set genre[$i] '$vEsc'"
+    }
+
+    $kid3Args = @()
+    foreach ($c in $cmds) { $kid3Args += @("-c", $c) }
+    $kid3Args += $FilePath
+
+    $out = & $Kid3Cli @kid3Args 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "kid3-cli failed: $out" }
+    return $true
+  }
+
+  $v1 = ConvertTo-Kid3Value ("" + $Value)
+  $cmd = "set $t '$v1'"
+  $out = & $Kid3Cli -c $cmd $FilePath 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "kid3-cli failed: $out" }
+  return $true
 }
 
 function Read-FolderPath {
@@ -138,48 +194,146 @@ function Get-TagValue {
   return $null
 }
 
-function Invoke-Kid3Write {
+function Invoke-OpustagsWrite {
   param(
-    [string]$Kid3Cli,
+    [string]$Opustags,
     [string]$FilePath,
-    [string]$TagName,
-    [string]$Value,
+    [hashtable]$Assignments,
     [switch]$DoCommit
   )
 
-  if ([string]::IsNullOrWhiteSpace($TagName)) { return $false }
+  if ($Assignments.Count -eq 0) { return $false }
   if (-not $DoCommit) { return $true }
 
-  # kid3-cli uses its own command parser. When using single quotes for the value,
-  # a single quote inside the value must be escaped with a backslash.
-  # Example from the kid3-cli manual: set title 'I\'ll be there for you'
-  $escapedValue = ("" + $Value).Replace("\\", "\\\\").Replace("'", "\\'")
+  try {
+    $previousPath = $env:Path
+    $opustagsPathResolved = $null
+    if ($Opustags -and (Test-Path $Opustags)) {
+      $opustagsPathResolved = (Resolve-Path $Opustags).Path
+    } else {
+      $cmd = Get-Command $Opustags -ErrorAction SilentlyContinue
+      if ($cmd) { $opustagsPathResolved = $cmd.Path }
+    }
 
-  # Map our menu tag names to kid3 field names.
-  # (Kid3 uses lowercase vorbis field names for Opus/Vorbis comments.)
-  $tagMap = @{
-    "TITLE"       = "title"
-    "ARTIST"      = "artist"
-    "ALBUM"       = "album"
-    "ALBUMARTIST" = "albumartist"
-    "TRACKNUMBER" = "track"
-    "DISCNUMBER"  = "disc"
-    "DATE"        = "date"
-    "GENRE"       = "genre"
-    "COMMENT"     = "comment"
+    # If opustags was built with MSYS2, make sure its runtime DLLs are on PATH.
+    if ($opustagsPathResolved -and ($opustagsPathResolved -match '\\msys64\\')) {
+      $msysRoot = ($opustagsPathResolved -split '\\msys64\\')[0] + '\msys64'
+      $msysBins = @(
+        (Join-Path $msysRoot 'mingw64\bin'),
+        (Join-Path $msysRoot 'usr\bin')
+      ) -join ';'
+      $env:Path = $msysBins + ';' + $env:Path
+    }
+
+    # opustags syntax:
+    #   --set FIELD=VALUE        (deletes existing FIELD values and adds a single one)
+    #   --delete FIELD --add FIELD=VALUE [--add FIELD=VALUE ...]  (multi-value)
+    #
+    # Multiple tags with the same FIELD are valid Vorbis comments, so we support
+    # passing an array value for a key to write multiple values.
+    #
+    # References: opustags man page (-a/--add, -d/--delete).
+    $opustagsArgs = @("--in-place")
+
+    foreach ($k in $Assignments.Keys) {
+      $v = $Assignments[$k]
+      if ($null -eq $v) { continue }
+
+      # Treat non-string enumerables (e.g., [string[]]) as multi-value tags.
+      $isEnumerable = ($v -is [System.Collections.IEnumerable]) -and -not ($v -is [string])
+      if ($isEnumerable) {
+        $values = @()
+        foreach ($item in $v) {
+          if ($null -eq $item) { continue }
+          $s = ("" + $item).Trim()
+          if (-not [string]::IsNullOrWhiteSpace($s)) { $values += $s }
+        }
+
+        if ($values.Count -eq 0) { continue }
+
+        # Replace all existing values for this field.
+        $opustagsArgs += "--delete"
+        $opustagsArgs += "$k"
+        foreach ($val in $values) {
+          $opustagsArgs += "--add"
+          $opustagsArgs += "${k}=$val"
+        }
+      } else {
+        # Single-value write (replace existing)
+        $opustagsArgs += "--set"
+        $opustagsArgs += "${k}=$v"
+      }
+    }
+    
+    $opustagsExe = if ($opustagsPathResolved) { $opustagsPathResolved } else { $Opustags }
+
+    function Invoke-OpustagsOnce {
+      param(
+        [string]$ExePath,
+        [string[]]$BaseArgs,
+        [string]$TargetPath
+      )
+      $invokeArgs = $BaseArgs + @($TargetPath)
+      $output = & $ExePath @invokeArgs 2>&1 | Out-String
+      return @{
+        ExitCode = $LASTEXITCODE
+        Output = $output
+      }
+    }
+
+    function Convert-ToPosixPath {
+      param([string]$WinPath)
+      if ($WinPath -match '^[A-Za-z]:\\') {
+        $drive = $WinPath.Substring(0,1).ToLower()
+        $rest = $WinPath.Substring(2) -replace '\\','/'
+        $rest = $rest.TrimStart('/')
+        return "/$drive/$rest"
+      }
+      return $WinPath
+    }
+
+    function Convert-ToExtendedWinPath {
+      param([string]$WinPath)
+      if ($WinPath -match '^[A-Za-z]:\\') {
+        return "\\?\$WinPath"
+      }
+      return $WinPath
+    }
+
+    $attempts = @()
+    $attempts += @{ Label = "win"; Path = $FilePath }
+
+    # Try extended-length path to avoid MAX_PATH issues.
+    if ($FilePath.Length -ge 240 -and $FilePath -match '^[A-Za-z]:\\') {
+      $attempts += @{ Label = "win_long"; Path = (Convert-ToExtendedWinPath -WinPath $FilePath) }
+    }
+
+    $pathLower = if ($opustagsPathResolved) { $opustagsPathResolved.ToLowerInvariant() } else { "" }
+    $isMingw = ($pathLower -like '*\msys64\mingw64\*') -or
+               ($pathLower -like '*\msys64\ucrt64\*') -or
+               ($pathLower -like '*\msys64\clang64\*')
+    $shouldTryPosix = $opustagsPathResolved -and ($opustagsPathResolved -match '\\msys64\\') -and (-not $isMingw)
+    if ($shouldTryPosix) {
+      $attempts += @{ Label = "posix"; Path = (Convert-ToPosixPath -WinPath $FilePath) }
+    }
+
+    $failures = @()
+    foreach ($attempt in $attempts) {
+      $result = Invoke-OpustagsOnce -ExePath $opustagsExe -BaseArgs $opustagsArgs -TargetPath $attempt.Path
+      if ($result.ExitCode -eq 0) { return $true }
+      $failures += "$($attempt.Label): exit $($result.ExitCode) - $($result.Output)"
+    }
+
+    if ($failures.Count -gt 0) {
+      throw ("opustags failed. " + ($failures -join " | "))
+    }
+    
+    return $true
+  } catch {
+    throw
+  } finally {
+    if ($previousPath) { $env:Path = $previousPath }
   }
-
-  $kid3Field = if ($tagMap.ContainsKey($TagName.ToUpper())) { $tagMap[$TagName.ToUpper()] } else { $TagName }
-
-  # Build the command as a *single* -c argument.
-  $cmd = "set $kid3Field '$escapedValue'"
-
-  $allOutput = & $Kid3Cli -c $cmd $FilePath 2>&1 | Out-String
-  if ($LASTEXITCODE -ne 0) {
-    throw "kid3-cli failed with code $LASTEXITCODE. Output: $allOutput"
-  }
-
-  return $true
 }
 
 function Invoke-FFmpegWrite {
@@ -239,8 +393,15 @@ function Invoke-FFmpegWrite {
     $streamInfoJson = & $ffprobePath @streamArgs 2>$null
     $streamInfo = $streamInfoJson | ConvertFrom-Json
     
-    if ($streamInfo.streams -and $streamInfo.streams.Count -gt 0) {
-        $stream = $streamInfo.streams[0]
+    # ffprobe JSON can return streams as a single object or an array.
+    # Force it to be an array so .Count and [0] always work.
+    $streams = @()
+    if ($streamInfo -and $null -ne $streamInfo.streams) {
+      $streams = @($streamInfo.streams)
+    }
+
+    if ($streams.Count -gt 0) {
+        $stream = $streams[0]
         
         # Get bitrate from format (preferred) or default to 128k
         $bitrate = 128
@@ -259,7 +420,7 @@ function Invoke-FFmpegWrite {
           }
         }
         
-        # Get sample rate
+        # Get sample rate (may be string)
         $sampleRate = 48000
         $srProp = $stream.PSObject.Properties | Where-Object { $_.Name -eq "sample_rate" }
         if ($srProp) {
@@ -385,11 +546,9 @@ function Set-CoverArt {
 # ---------------- Main ----------------
 
 # Resolve required tools
-$kid3 = Resolve-Kid3CliTool -Path $Kid3CliPath
-$ffprobe = Resolve-FFmpegTool -Path $FFprobePath -ToolName "ffprobe"
-
-# ffmpeg is only needed for cover art embedding (if you say yes later), but we resolve it up-front
+$kid3 = Resolve-Kid3Cli -Path $Kid3CliPath
 $ffmpeg = Resolve-FFmpegTool -Path $FFmpegPath -ToolName "ffmpeg"
+$ffprobe = Resolve-FFmpegTool -Path $FFprobePath -ToolName "ffprobe"
 
 if ([string]::IsNullOrWhiteSpace($RootPath)) {
   $RootPath = Read-FolderPath "Enter root folder to process (e.g. D:\Media\Music)"
@@ -433,6 +592,30 @@ if ($mode -eq "2") { $fillMissingOnly = $false }
 
 $newValue = Read-Host "Enter the value to set for $tagName"
 
+# Multi-value support (Navidrome + Vorbis comments):
+# For GENRE we can write multiple values as repeated GENRE tags.
+# Enter values separated by ',', ';' or '/' (e.g., "Game; Soundtrack; Rock").
+$newValueList = $null
+if ($tagName.ToUpper() -eq "GENRE") {
+  # IMPORTANT: PowerShell can "unwrap" single-item pipeline output into a scalar string.
+  # A scalar string does NOT have a .Count property, so always force an array.
+  $parts = @(
+    ($newValue -split '\s*[,;/]\s*') |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      ForEach-Object { $_.Trim() }
+  )
+
+  if ($parts.Count -gt 1) {
+    # Preserve order while removing exact duplicates
+    $seen = @{}
+    $deduped = @()
+    foreach ($p in $parts) {
+      if (-not $seen.ContainsKey($p)) { $seen[$p] = $true; $deduped += $p }
+    }
+    $newValueList = $deduped
+  }
+}
+
 $doEmbed = Read-Host "Embed cover art if found in each album folder? (y/n)"
 $embedCover = $doEmbed -match '^(y|yes)$'
 
@@ -443,7 +626,7 @@ $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $logPath = Join-Path $logDir "OpusTagEdits_$stamp.csv"
 "File,AlbumFolder,Tag,OldValue,NewValue,Changed,EmbeddedCover,Result" | Out-File -Encoding UTF8 -FilePath $logPath
 
-$files = Get-OpusFiles -Path $RootPath
+$files = @(Get-OpusFiles -Path $RootPath)
 Write-Host ""
 Write-Host ("Found {0} opus files." -f $files.Count)
 Write-Host ""
@@ -471,8 +654,9 @@ foreach ($f in $files) {
 
   try {
     if ($shouldChange) {
-      # Write tags using kid3-cli (in-place)
-      $didWrite = Invoke-Kid3Write -Kid3Cli $kid3 -FilePath $filePath -TagName $tagName -Value $newValue -DoCommit:$Commit
+      # Tag writing is done exclusively via kid3-cli (in-place).
+      $valueToWrite = if ($newValueList) { $newValueList } else { $newValue }
+      $didWrite = Invoke-Kid3Write -Kid3Cli $kid3 -FilePath $filePath -TagName $tagName -Value $valueToWrite -DoCommit:$Commit
       if ($didWrite) { $changedCount++ } else { $skippedCount++ }
     } else {
       $skippedCount++
@@ -487,6 +671,7 @@ foreach ($f in $files) {
     }
   } catch {
     $result = ("ERROR: " + $_.Exception.Message.Replace('"',''''))
+    $skippedCount++
   }
 
   $changedFlag = $(if ($shouldChange) { "Yes" } else { "No" })
@@ -494,7 +679,8 @@ foreach ($f in $files) {
 
   # CSV-safe-ish escaping
   $oldEsc = ("" + $old).Replace('"','''')
-  $newEsc = ("" + $newValue).Replace('"','''')
+  $newDisplay = if ($newValueList) { ($newValueList -join "; ") } else { $newValue }
+  $newEsc = ("" + $newDisplay).Replace('"','''')
 
   ('"{0}","{1}","{2}","{3}","{4}","{5}","{6}","{7}"' -f
     $filePath.Replace('"',''''),
