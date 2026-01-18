@@ -194,6 +194,26 @@ function Get-TagValue {
   return $null
 }
 
+function Get-TrackNumberFromFileName {
+  param([Parameter(Mandatory)][string]$FilePath)
+
+  $base = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+  if (-not $base) { return $null }
+  $base = $base.Trim()
+
+  # Pattern: "01-12 ..." (disc-track) -> track=12
+  if ($base -match '^\s*0*(\d{1,2})\s*-\s*0*(\d{1,3})(?=\D|$)') {
+    return [string]([int]$matches[2])
+  }
+
+  # Pattern: "12 - ..." or "12_..." or "12. ..." -> track=12
+  if ($base -match '^\s*0*(\d{1,3})(?=\s*[-_.]|[\s]+)') {
+    return [string]([int]$matches[1])
+  }
+
+  return $null
+}
+
 function Invoke-OpustagsWrite {
   param(
     [string]$Opustags,
@@ -590,7 +610,20 @@ $mode = Read-Host "Apply mode: (1) Fill missing only  (2) Overwrite existing"
 $fillMissingOnly = $true
 if ($mode -eq "2") { $fillMissingOnly = $false }
 
-$newValue = Read-Host "Enter the value to set for $tagName"
+$deriveTrackFromFilename = $false
+
+if ($tagName.ToUpper() -eq "TRACKNUMBER") {
+  Write-Host ""
+  $tnMode = Read-Host "TRACKNUMBER input: (1) Set same value for all  (2) Derive from filename prefix"
+  if ($tnMode -eq "2") { $deriveTrackFromFilename = $true }
+}
+
+if (-not $deriveTrackFromFilename) {
+  $newValue = Read-Host "Enter the value to set for $tagName"
+} else {
+  # No single shared value when deriving per-file
+  $newValue = ""
+}
 
 # Multi-value support (Navidrome + Vorbis comments):
 # For GENRE we can write multiple values as repeated GENRE tags.
@@ -651,11 +684,24 @@ foreach ($f in $files) {
   $didWrite = $false
   $didCover = $false
   $result = "OK"
+  $valueForLog = $null
 
   try {
     if ($shouldChange) {
       # Tag writing is done exclusively via kid3-cli (in-place).
-      $valueToWrite = if ($newValueList) { $newValueList } else { $newValue }
+      $valueToWrite = $null
+
+      if ($deriveTrackFromFilename -and $tagName.ToUpper() -eq "TRACKNUMBER") {
+        $derived = Get-TrackNumberFromFileName -FilePath $filePath
+        if (-not $derived) {
+          throw "Could not derive TRACKNUMBER from filename: $($f.Name)"
+        }
+        $valueToWrite = $derived
+      } else {
+        $valueToWrite = if ($newValueList) { $newValueList } else { $newValue }
+      }
+
+      $valueForLog = $valueToWrite
       $didWrite = Invoke-Kid3Write -Kid3Cli $kid3 -FilePath $filePath -TagName $tagName -Value $valueToWrite -DoCommit:$Commit
       if ($didWrite) { $changedCount++ } else { $skippedCount++ }
     } else {
@@ -679,7 +725,11 @@ foreach ($f in $files) {
 
   # CSV-safe-ish escaping
   $oldEsc = ("" + $old).Replace('"','''')
-  $newDisplay = if ($newValueList) { ($newValueList -join "; ") } else { $newValue }
+  $newDisplay = if ($deriveTrackFromFilename -and $tagName.ToUpper() -eq "TRACKNUMBER") {
+    ("" + $valueForLog)
+  } else {
+    if ($newValueList) { ($newValueList -join "; ") } else { $newValue }
+  }
   $newEsc = ("" + $newDisplay).Replace('"','''')
 
   ('"{0}","{1}","{2}","{3}","{4}","{5}","{6}","{7}"' -f
