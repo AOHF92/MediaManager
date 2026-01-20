@@ -668,7 +668,9 @@ $changedCount = 0
 $coverCount = 0
 $skippedCount = 0
 
-foreach ($f in $files) {
+$totalFiles = $files.Count
+for ($i = 0; $i -lt $totalFiles; $i++) {
+  $f = $files[$i]
   $filePath = $f.FullName
   $albumFolder = $f.DirectoryName
 
@@ -688,6 +690,11 @@ foreach ($f in $files) {
 
   try {
     if ($shouldChange) {
+      $current = $i + 1
+      $percent = if ($totalFiles -gt 0) { [math]::Floor(($current / $totalFiles) * 100) } else { 0 }
+      Write-Progress -Activity "Applying metadata" -Status "($current/$totalFiles) $($f.Name)" -PercentComplete $percent
+      Write-Host ("Applying metadata ({0}/{1}): {2}" -f $current, $totalFiles, $f.Name) -ForegroundColor Cyan
+
       # Tag writing is done exclusively via kid3-cli (in-place).
       $valueToWrite = $null
 
@@ -743,6 +750,8 @@ foreach ($f in $files) {
     $result.Replace('"','''')
   ) | Out-File -Encoding UTF8 -Append -FilePath $logPath
 }
+
+Write-Progress -Activity "Applying metadata" -Completed
 
 Write-Host ""
 Write-Host "Done."

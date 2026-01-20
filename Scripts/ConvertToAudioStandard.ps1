@@ -561,22 +561,12 @@ function Set-DiscFallbackAndNormalizeAlbum {
 
 function Build-OutputPath {
   param(
-    [Parameter(Mandatory)][string]$SourceRoot,
     [Parameter(Mandatory)][string]$FilePath,
-    [hashtable]$Metadata,
-    [string]$ResolvedArtist,
-    [string]$ResolvedYear
+    [hashtable]$Metadata
   )
   
-  # Navidrome-friendly layout: Artist/Album (Year)/Track.opus
+  # Output next to the source file (no artist/album folders)
   # Multi-disc: Track number includes disc if present (no disc folders)
-  # Year is appended to album folder name when available
-  
-  $album = if ($Metadata.Album -and -not [string]::IsNullOrWhiteSpace($Metadata.Album)) {
-    $Metadata.Album
-  } else {
-    "Unknown Album"
-  }
   
   $trackNum = if ($Metadata.Track) {
     # Handle "1/12" or "01" formats
@@ -618,24 +608,9 @@ function Build-OutputPath {
     return $s.Trim('_', ' ')
   }
   
-  $safeArtist = & $sanitize $ResolvedArtist
-  $safeAlbum = & $sanitize $album
   $safeTitle = & $sanitize $title
   
-  # Append year to album name if available
-  # Check if album name already contains a year in parentheses to avoid duplicates
-  if ($ResolvedYear -and -not [string]::IsNullOrWhiteSpace($ResolvedYear)) {
-    # Check if album already has a year in parentheses (e.g., "Album (2018)" or "Album(2018)")
-    if ($safeAlbum -notmatch '\((\d{4})\)') {
-      $safeAlbum = "${safeAlbum} ($ResolvedYear)"
-    }
-    # If it already has a year, we keep the existing one (from metadata/filename takes precedence)
-  }
-  
-  # Build path: SourceRoot/Artist/Album (Year)/Track - Title.opus
-  $outputDir = Join-Path $SourceRoot $safeArtist
-  $outputDir = Join-Path $outputDir $safeAlbum
-  
+  $outputDir = [System.IO.Path]::GetDirectoryName($FilePath)
   $outputFileName = "${trackNum} - ${safeTitle}${OPUS_EXTENSION}"
   $outputPath = Join-Path $outputDir $outputFileName
   
@@ -1149,7 +1124,7 @@ function Invoke-MainProcessing {
     $resolvedArtist = Resolve-Artist -Metadata $metadata -FilePath $file.FullName
     
     # Build paths
-    $outputPath = Build-OutputPath -SourceRoot $SourceRoot -FilePath $file.FullName -Metadata $metadata -ResolvedArtist $resolvedArtist -ResolvedYear $resolvedYear
+    $outputPath = Build-OutputPath -FilePath $file.FullName -Metadata $metadata
     $archivePath = Build-ArchivePath -DestinationRoot $DestinationRoot -SourceRoot $SourceRoot -FilePath $file.FullName
     
     $workItems += @{
