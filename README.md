@@ -1,6 +1,6 @@
 # MediaManager
 
-Deterministic PowerShell scripts for auditing and standardizing a media library, optimized for **Cloudflare Tunnel delivery** and **Jellyfin compatibility**.
+PowerShell scripts for auditing and standardizing a media library, optimized for **Cloudflare Tunnel delivery** and **Compatibility for various apps**.
 
 ---
 
