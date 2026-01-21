@@ -944,22 +944,32 @@ function Move-CoverImagesToArchive {
       $archiveCoverPath = Join-Path $ArchiveDir $coverName
       $outputCoverPath = Join-Path $OutputDir $coverName
       
-      # Only process if it doesn't already exist in archive (avoid duplicates)
-      if (-not (Test-Path -LiteralPath $archiveCoverPath)) {
-        try {
-          # Copy to output directory (SourceRoot) first
-          if (-not (Test-Path -LiteralPath $outputCoverPath)) {
-            Copy-Item -LiteralPath $sourceCoverPath -Destination $outputCoverPath -Force
-            Write-Host "  [COVER] Copied $actualCoverName to output" -ForegroundColor DarkGreen
-          }
-          
-          # Then move original to archive
+      $sourceFullPath = [System.IO.Path]::GetFullPath($sourceCoverPath)
+      $outputFullPath = [System.IO.Path]::GetFullPath($outputCoverPath)
+      $outputIsSource = [string]::Equals($sourceFullPath, $outputFullPath, [System.StringComparison]::OrdinalIgnoreCase)
+      $archiveExists = Test-Path -LiteralPath $archiveCoverPath
+      
+      try {
+        # If output is a different directory, copy before moving
+        if (-not $outputIsSource -and -not (Test-Path -LiteralPath $outputCoverPath)) {
+          Copy-Item -LiteralPath $sourceCoverPath -Destination $outputCoverPath -Force
+          Write-Host "  [COVER] Copied $actualCoverName to output" -ForegroundColor DarkGreen
+        }
+        
+        # Move original to archive only if not already archived
+        if (-not $archiveExists) {
           Move-Item -LiteralPath $sourceCoverPath -Destination $archiveCoverPath -Force
           $movedCount++
           Write-Host "  [COVER] Moved $actualCoverName to archive" -ForegroundColor DarkGreen
-        } catch {
-          Write-Warning "Failed to process cover image ${actualCoverName}: $($_.Exception.Message)"
         }
+        
+        # If output is the same as source, ensure a copy exists after moving
+        if ($outputIsSource -and (Test-Path -LiteralPath $archiveCoverPath) -and -not (Test-Path -LiteralPath $outputCoverPath)) {
+          Copy-Item -LiteralPath $archiveCoverPath -Destination $outputCoverPath -Force
+          Write-Host "  [COVER] Copied $actualCoverName to output" -ForegroundColor DarkGreen
+        }
+      } catch {
+        Write-Warning "Failed to process cover image ${actualCoverName}: $($_.Exception.Message)"
       }
     }
   }
